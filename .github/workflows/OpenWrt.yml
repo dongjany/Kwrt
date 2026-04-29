@@ -1,0 +1,75 @@
+name: Build OpenWrt 24.10
+
+# 触发条件：手动触发、push 到 main 分支（可自定义）
+on:
+  workflow_dispatch:  # 手动触发（推荐）
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/openwrt-build.yml'  # 仅修改该文件时触发
+
+# 权限配置
+permissions:
+  contents: write  # 用于上传编译产物到 Releases
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04  # 推荐 Ubuntu 22.04（兼容OpenWrt编译依赖）
+    steps:
+      - name: 检查系统环境
+        run: |
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
+          sudo apt update && sudo apt full-upgrade -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
+
+      - name: 拉取 OpenWrt 24.10 源码
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt  # 可替换为你的 Fork 仓库
+          ref: openwrt-24.10          # 24.10 稳定标签（或分支 v24.10）
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: 更新 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 加载自定义配置文件（关键）
+        # 方式1：上传本地生成的 .config 到仓库根目录，直接复制
+        run: |
+          [ -f .config ] && mv .config .config.bak
+          cp custom.config .config  # 假设你上传了 custom.config 到仓库
+          # 方式2：在线生成配置（示例，需自定义）
+          # make defconfig  # 默认配置
+          # make menuconfig  # 交互式（Actions中无法操作，仅本地用）
+
+      - name: 下载编译依赖包
+        run: |
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译 OpenWrt 固件
+        run: |
+          make -j$(nproc) || make -j1 V=s  # 编译失败时单线程输出详细日志
+          echo "编译完成，开始整理产物"
+
+      - name: 打包编译产物
+        run: |
+          mkdir -p openwrt-bin
+          cp -r bin/targets/*/*/*.bin openwrt-bin/
+          cp -r bin/targets/*/*/*.img openwrt-bin/
+          cp -r bin/targets/*/*/*.tar.gz openwrt-bin/
+          zip -r openwrt-24.10-build-$(date +%Y%m%d).zip openwrt-bin/
+
+      - name: 上传产物到 Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_id }}
+          files: openwrt-24.10-build-*.zip
+          body: "OpenWrt 24.10 自动编译产物 | 触发ID: ${{ github.run_id }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
